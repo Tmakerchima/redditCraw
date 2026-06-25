@@ -1,24 +1,42 @@
 #!/usr/bin/env python3
-"""Generate a Xiaohongshu-ready daily digest from r/artificial.
+"""Generate Xiaohongshu-style AI news cards from r/artificial.
 
-Outputs Markdown plus 7 SVG cards (cover, 5 posts, trend) under
-D:\\codex\\autogenFlow\\YYYY-MM-DD on Windows by default. On Linux/macOS,
-that Windows path is mapped to /mnt/d/codex/autogenFlow when available,
-otherwise to ./D_drive/codex/autogenFlow.
+Default output directory:
+  D:\\codex\\autogenFlow\\YYYY-MM-DD
+
+The flow writes five vertical PNG images, one Reddit item per page, plus
+posts.json and daily.md for editing/copywriting.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
-import html
 import json
 import os
 import re
+import shutil
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-DEFAULT_UA = "redditCraw Daily News Generator/1.0 (by u/Tmakerchima)"
+from PIL import Image, ImageDraw, ImageFont
+
+DEFAULT_UA = "redditCraw Daily News Generator/1.2 (by u/Tmakerchima)"
+DEFAULT_TITLE = "AI\u4eca\u65e5\u8d44\u8baf"
+SUBREDDIT = "artificial"
+
+TEXT_SOURCE = "\u6765\u6e90\uff1aReddit r/artificial \u6700\u65b0\u5e16\u5b50"
+TEXT_AUTHOR = "\u4f5c\u8005"
+TEXT_TIME = "\u53d1\u5e03\u65f6\u95f4"
+TEXT_HEAT = "\u70ed\u5ea6"
+TEXT_POST = "\u539f\u5e16"
+TEXT_LINK = "\u5916\u90e8\u94fe\u63a5"
+TEXT_NONE = "\u65e0"
+TEXT_SUMMARY = "\u6458\u8981"
+TEXT_INSIGHT = "\u89e3\u8bfb"
+TEXT_CARD_SUMMARY = "\u8d44\u8baf\u6458\u8981"
+TEXT_CARD_INSIGHT = "AI\u89e3\u8bfb"
+TEXT_TAGS = "#AI #\u4eba\u5de5\u667a\u80fd #\u4eca\u65e5\u8d44\u8baf #LLM"
 
 
 def resolve_output_root(value: str | None) -> Path:
@@ -34,7 +52,7 @@ def resolve_output_root(value: str | None) -> Path:
 
 
 def fetch_reddit(limit: int = 5) -> list[dict[str, Any]]:
-    url = f"https://www.reddit.com/r/artificial/new.json?limit={limit}&raw_json=1"
+    url = f"https://www.reddit.com/r/{SUBREDDIT}/new.json?limit={limit}&raw_json=1"
     req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_UA})
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
@@ -49,7 +67,7 @@ def fetch_reddit(limit: int = 5) -> list[dict[str, Any]]:
             external = ""
         posts.append(
             {
-                "title": data.get("title", ""),
+                "title": data.get("title", "").strip(),
                 "author": data.get("author", "unknown"),
                 "created_utc": created.strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "ups": data.get("ups", 0),
@@ -62,154 +80,172 @@ def fetch_reddit(limit: int = 5) -> list[dict[str, Any]]:
     return posts
 
 
-def one_line_summary(post: dict[str, Any]) -> str:
-    text = post.get("selftext") or post["title"]
-    text = re.sub(r"\s+", " ", text).strip()
-    return (text[:115] + "...") if len(text) > 115 else text
+def clean_text(value: str) -> str:
+    value = re.sub(r"https?://\S+", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def truncate(value: str, limit: int) -> str:
+    value = clean_text(value)
+    return value[: limit - 3].rstrip() + "..." if len(value) > limit else value
+
+
+def summary_for(post: dict[str, Any]) -> str:
+    source = post.get("selftext") or post.get("title") or ""
+    return truncate(source, 150)
+
+
+def angle_for(post: dict[str, Any]) -> str:
+    text = f"{post.get('title', '')} {post.get('selftext', '')}".lower()
+    if any(term in text for term in ["agent", "workflow", "automation"]):
+        return "\u5173\u6ce8 Agent \u5de5\u4f5c\u6d41\u662f\u5426\u80fd\u771f\u5b9e\u964d\u4f4e\u4eba\u529b\u6210\u672c\uff0c\u800c\u4e0d\u662f\u53ea\u505c\u7559\u5728\u6f14\u793a\u6548\u679c\u3002"
+    if any(term in text for term in ["model", "llm", "gpt", "claude", "gemini"]):
+        return "\u91cd\u70b9\u770b\u6a21\u578b\u80fd\u529b\u8fb9\u754c\u3001\u7a33\u5b9a\u6027\u548c\u53ef\u63a7\u6027\uff0c\u5bf9\u4ea7\u54c1\u843d\u5730\u5f71\u54cd\u66f4\u76f4\u63a5\u3002"
+    if any(term in text for term in ["law", "regulation", "copyright", "policy"]):
+        return "\u8fd9\u7c7b\u8bdd\u9898\u4f1a\u5f71\u54cd AI \u4ea7\u54c1\u7684\u5408\u89c4\u6210\u672c\uff0c\u4e5f\u4f1a\u6539\u53d8\u521b\u4e1a\u516c\u53f8\u7684\u8282\u594f\u3002"
+    return "\u9002\u5408\u4ece\u4ea7\u54c1\u3001\u5f00\u53d1\u8005\u548c\u5546\u4e1a\u5316\u4e09\u4e2a\u89d2\u5ea6\u5224\u65ad\u8fd9\u6761\u8d44\u8baf\u7684\u5b9e\u9645\u4ef7\u503c\u3002"
 
 
 def build_markdown(posts: list[dict[str, Any]], day: str) -> str:
-    lines = [
-        f"# AI Daily News {day}",
-        "",
-        "适合小红书发布的 r/artificial 最新 5 篇帖子日报。",
-        "",
-    ]
-    for index, post in enumerate(posts, 1):
+    lines = [f"# {DEFAULT_TITLE} {day}", "", TEXT_SOURCE, ""]
+    for index, post in enumerate(posts[:5], 1):
         lines += [
             f"## {index}. {post['title']}",
             "",
-            f"作者：{post['author']}",
+            f"{TEXT_AUTHOR}\uff1a{post['author']}",
+            f"{TEXT_TIME}\uff1a{post['created_utc']}",
+            f"{TEXT_HEAT}\uff1a{post['ups']} upvotes / {post['num_comments']} comments",
+            f"{TEXT_POST}\uff1a{post['permalink']}",
+            f"{TEXT_LINK}\uff1a{post['external_url'] or TEXT_NONE}",
             "",
-            f"发布时间：{post['created_utc']}",
+            f"{TEXT_SUMMARY}\uff1a{summary_for(post)}",
             "",
-            f"热度：⬆ {post['ups']}",
-            "",
-            f"评论：{post['num_comments']}",
-            "",
-            "标签：",
-            "",
-            "#AI #LLM #Agent",
-            "",
-            f"原帖链接：{post['permalink']}",
-            "",
-            f"外部新闻链接：{post['external_url'] or '无'}",
-            "",
-            "### 新闻摘要",
-            "",
-            (
-                f"{one_line_summary(post)} "
-                "本条内容来自 Reddit r/artificial 最新帖子；如果包含外部链接，"
-                "发布前建议补充阅读原文并替换为新闻原文摘要。"
-            ),
-            "",
-            "### 中文解读",
-            "",
-            (
-                "从开发者视角看，这条内容可用于观察 AI 产品、LLM 能力、"
-                "Agent 工作流和行业商业化趋势。建议重点评估技术意义、商业意义、"
-                "对 Agent 的影响、对 AI 开发岗位的影响，以及可能带来的行业变化。"
-            ),
+            f"{TEXT_INSIGHT}\uff1a{angle_for(post)}",
             "",
         ]
-    lines += [
-        "## 今日趋势",
-        "",
-        (
-            "今天的 r/artificial 最新内容可作为海外 AI 社区温度计：重点观察模型能力、"
-            "Agent 落地、商业化、监管与开发者岗位变化。"
-        ),
-        "",
-    ]
     return "\n".join(lines)
 
 
-def wrap_text(text: str, width: int) -> list[str]:
-    """Wrap mixed Chinese/English text for SVG cards without external deps."""
-    chunks: list[str] = []
+def font_path(bold: bool = False) -> str | None:
+    candidates = [
+        r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\NotoSansSC-VF.ttf",
+        r"C:\Windows\Fonts\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    path = font_path(bold)
+    if path:
+        return ImageFont.truetype(path, size=size)
+    return ImageFont.load_default()
+
+
+def text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> float:
+    box = draw.textbbox((0, 0), text, font=font)
+    return box[2] - box[0]
+
+
+def wrap_by_pixels(
+    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int
+) -> list[str]:
+    words = re.findall(r"[A-Za-z0-9_./:+#'-]+|\s+|.", text)
+    lines: list[str] = []
     line = ""
-    count = 0
-    for char in text:
-        char_width = 1 if ord(char) < 128 else 2
-        if count + char_width > width and line:
-            chunks.append(line)
-            line = char
-            count = char_width
-        else:
-            line += char
-            count += char_width
-    if line:
-        chunks.append(line)
-    return chunks or [""]
+    for word in words:
+        candidate = line + word
+        if text_width(draw, candidate.strip(), font) <= max_width or not line:
+            line = candidate
+            continue
+        lines.append(line.strip())
+        line = word
+    if line.strip():
+        lines.append(line.strip())
+    return lines
 
 
-def svg_card(title: str, body: list[str], footer: str) -> str:
-    def esc(value: str) -> str:
-        return html.escape(value, quote=True)
-
-    y = 170
-    body_svg = []
-    for line in body:
-        for wrapped in wrap_text(line, 44):
-            body_svg.append(
-                f'<text x="80" y="{y}" fill="#dbeafe" font-size="34" '
-                f'font-family="Arial, sans-serif">{esc(wrapped)}</text>'
-            )
-            y += 48
-        y += 10
-
-    title_lines = wrap_text(title, 34)[:3]
-    title_svg = "".join(
-        f'<text x="80" y="{78 + i * 54}" fill="#ffffff" font-size="44" '
-        f'font-weight="700" font-family="Arial, sans-serif">{esc(line)}</text>'
-        for i, line in enumerate(title_lines)
-    )
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1242" height="1656" viewBox="0 0 1242 1656">
-<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#111827"/><stop offset="0.55" stop-color="#172554"/><stop offset="1" stop-color="#581c87"/></linearGradient></defs>
-<rect width="1242" height="1656" fill="url(#g)"/><circle cx="1040" cy="210" r="220" fill="#38bdf8" opacity="0.12"/><circle cx="160" cy="1410" r="260" fill="#a78bfa" opacity="0.14"/>
-<path d="M80 1320 C360 1180 610 1450 1160 1260" stroke="#60a5fa" stroke-width="3" opacity="0.28" fill="none"/>
-{title_svg}<rect x="70" y="136" width="1100" height="2" fill="#93c5fd" opacity="0.45"/>{''.join(body_svg)}
-<text x="80" y="1580" fill="#bfdbfe" font-size="30" font-family="Arial, sans-serif">{esc(footer)}</text></svg>"""
+def draw_wrapped(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: str,
+    max_width: int,
+    line_height: int,
+    max_lines: int | None = None,
+) -> int:
+    x, y = xy
+    lines = wrap_by_pixels(draw, text, font, max_width)
+    if max_lines and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        while lines[-1] and text_width(draw, lines[-1] + "...", font) > max_width:
+            lines[-1] = lines[-1][:-1]
+        lines[-1] = lines[-1].rstrip() + "..."
+    for line in lines:
+        draw.text((x, y), line, font=font, fill=fill)
+        y += line_height
+    return y
 
 
-def write_outputs(posts: list[dict[str, Any]], out_dir: Path, day: str) -> None:
+def news_card_png(post: dict[str, Any], out_path: Path, index: int, total: int, day: str) -> None:
+    title = truncate(post["title"], 120)
+    summary = summary_for(post)
+    angle = angle_for(post)
+    meta = f"r/artificial  |  {post['ups']} upvotes  |  {post['num_comments']} comments"
+    source = f"by u/{post['author']}  \u00b7  {post['created_utc'].replace(' UTC', '')}"
+
+    image = Image.new("RGB", (1242, 1656), "#f7f2ec")
+    draw = ImageDraw.Draw(image)
+    title_font = load_font(54, bold=True)
+    header_font = load_font(48, bold=True)
+    label_font = load_font(32, bold=True)
+    body_font = load_font(34)
+    small_font = load_font(26)
+    tag_font = load_font(25, bold=True)
+
+    draw.rectangle((0, 0, 1242, 218), fill="#ff2442")
+    draw.text((78, 54), DEFAULT_TITLE, font=header_font, fill="#ffffff")
+    draw.text((78, 132), f"Reddit r/artificial \u00b7 {day}", font=small_font, fill="#ffe2e7")
+    draw.text((1064, 82), f"{index:02d}/{total:02d}", font=load_font(42, bold=True), fill="#ffffff")
+
+    draw.rounded_rectangle((52, 238, 1190, 1566), radius=30, fill="#ffffff")
+    draw.rounded_rectangle((78, 276, 90, 448), radius=6, fill="#ff2442")
+    draw_wrapped(draw, (108, 268), title, title_font, "#111111", 1000, 68, max_lines=4)
+
+    draw.line((92, 598, 1150, 598), fill="#f0e6de", width=2)
+    draw.text((92, 634), TEXT_CARD_SUMMARY, font=label_font, fill="#ff2442")
+    draw_wrapped(draw, (92, 706), summary, body_font, "#2f2f2f", 1058, 52, max_lines=5)
+
+    draw.line((92, 967, 1150, 967), fill="#f0e6de", width=2)
+    draw.text((92, 1005), TEXT_CARD_INSIGHT, font=label_font, fill="#ff2442")
+    draw_wrapped(draw, (92, 1077), angle, body_font, "#4b5563", 1058, 52, max_lines=4)
+
+    draw.line((92, 1352, 1150, 1352), fill="#f0e6de", width=2)
+    draw_wrapped(draw, (92, 1406), meta, small_font, "#777777", 1058, 36, max_lines=2)
+    draw_wrapped(draw, (92, 1460), source, small_font, "#999999", 1058, 36, max_lines=2)
+    draw.text((92, 1522), TEXT_TAGS, font=tag_font, fill="#ff2442")
+    image.save(out_path, "PNG", optimize=True)
+
+
+def write_outputs(posts: list[dict[str, Any]], out_dir: Path, day: str, clean: bool = False) -> None:
+    if clean and out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "daily.md").write_text(build_markdown(posts, day), encoding="utf-8")
+
+    selected = posts[:5]
+    (out_dir / "daily.md").write_text(build_markdown(selected, day), encoding="utf-8")
     (out_dir / "posts.json").write_text(
-        json.dumps(posts, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(selected, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (out_dir / "00_cover.svg").write_text(
-        svg_card(
-            f"AI Daily News {day}",
-            ["Reddit r/artificial", "今日 5 条精选", "AI · LLM · Agent · 商业化"],
-            f"AI Daily News · {day}",
-        ),
-        encoding="utf-8",
-    )
-    for index, post in enumerate(posts, 1):
-        body = [
-            f"作者：{post['author']}  时间：{post['created_utc']}",
-            f"热度：⬆ {post['ups']}  评论：{post['num_comments']}",
-            "核心看点：" + one_line_summary(post),
-            "开发者视角：关注技术意义、商业意义、Agent 影响与岗位变化。",
-        ]
-        (out_dir / f"{index:02d}_post.svg").write_text(
-            svg_card(f"{index:02d} {post['title']}", body, "Reddit r/artificial"),
-            encoding="utf-8",
-        )
-    (out_dir / "06_trend.svg").write_text(
-        svg_card(
-            "今日趋势",
-            [
-                "1. 模型能力与可控性仍是核心",
-                "2. Agent 落地更关注成本和可靠性",
-                "3. 商业化、监管和岗位变化同步加速",
-                "一句话总结：AI 正从能力竞赛进入落地约束阶段。",
-            ],
-            f"AI Daily News · {day}",
-        ),
-        encoding="utf-8",
-    )
+    for index, post in enumerate(selected, 1):
+        news_card_png(post, out_dir / f"{index:02d}_news.png", index, len(selected), day)
 
 
 def main() -> None:
@@ -217,6 +253,7 @@ def main() -> None:
     parser.add_argument("--date", default=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d"))
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--input-json", help="Use a local posts JSON file instead of fetching Reddit.")
+    parser.add_argument("--clean", action="store_true", help="Delete the target date folder before writing.")
     args = parser.parse_args()
 
     posts = (
@@ -225,7 +262,7 @@ def main() -> None:
         else fetch_reddit(5)
     )
     out_dir = resolve_output_root(args.output_root) / args.date
-    write_outputs(posts, out_dir, args.date)
+    write_outputs(posts, out_dir, args.date, clean=args.clean)
     print(out_dir)
 
 
